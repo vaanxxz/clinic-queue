@@ -42,12 +42,14 @@ import time as _time
 
 def _enqueue(student_id: str, reason: str, urgent: bool) -> dict:
     from models import Patient
+    from datetime import datetime
+
     p = Patient(
         name=student_id,
         student_id=student_id,
         reason=reason,
         urgent=urgent,
-        timestamp=_time.strftime("%H:%M"),
+        timestamp=datetime.now(),
     )
     _qm.enqueue(p)
     persistence.save(_qm)
