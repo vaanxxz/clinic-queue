@@ -45,7 +45,7 @@ def _enqueue(student_id: str, reason: str, urgent: bool) -> dict:
     p = Patient(
         student_id=student_id,
         reason=reason,
-        is_urgent=urgent,
+        urgent=urgent,
         timestamp=_time.strftime("%H:%M"),
     )
     _qm.enqueue(p)
