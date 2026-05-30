@@ -361,7 +361,7 @@ def checkin():
 
         if sid and reason and _enqueue_callback:
             # name == student_id (no separate name in v6)
-            _enqueue_callback(sid, sid, reason, urgent)
+            _enqueue_callback(sid, reason, urgent)
 
         from flask import redirect
         return redirect(f"/status/{sid}")
