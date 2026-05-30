@@ -43,6 +43,7 @@ import time as _time
 def _enqueue(student_id: str, reason: str, urgent: bool) -> dict:
     from models import Patient
     p = Patient(
+        name=student_id,
         student_id=student_id,
         reason=reason,
         urgent=urgent,
