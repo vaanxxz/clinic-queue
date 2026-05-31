@@ -73,11 +73,11 @@ def _find_in_queue(student_id: str) -> dict | None:
 
 # ── Stub callbacks (no GUI) ───────────────────────────────────────────────────
 
-def _enqueue(student_id: str, reason: str, urgent: bool) -> dict:
+def _enqueue(name: str, student_id: str, reason: str, urgent: bool) -> dict:
     from models import Patient
 
     p = Patient(
-        name=student_id,
+        name=name or student_id,
         student_id=student_id,
         reason=reason,
         urgent=urgent,
