@@ -38,6 +38,39 @@ _qm = QueueManager()
 persistence.load(_qm)
 log.info("Queue manager ready.")
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _find_in_queue(student_id: str) -> dict | None:
+    """
+    Search both priority_heap and normal_queue for a patient by student_id.
+    Returns a dict with keys: position, total, queue_type
+    or None if not found.
+    Priority patients always rank before normal ones, so their effective
+    position is their index within the heap (sorted by insertion order).
+    Normal patients' effective position starts after all priority patients.
+    """
+    # Priority heap: sort by _order key so position reflects insertion order
+    priority_patients = [p for _, p in sorted(_qm.priority_heap)]
+    for i, p in enumerate(priority_patients):
+        if getattr(p, "student_id", None) == student_id:
+            return {
+                "position": i + 1,
+                "total": _qm.total_count(),
+                "queue_type": "urgent",
+            }
+
+    # Normal queue
+    for i, p in enumerate(_qm.normal_queue):
+        if getattr(p, "student_id", None) == student_id:
+            return {
+                "position": len(priority_patients) + i + 1,
+                "total": _qm.total_count(),
+                "queue_type": "normal",
+            }
+
+    return None
+
+
 # ── Stub callbacks (no GUI) ───────────────────────────────────────────────────
 
 def _enqueue(student_id: str, reason: str, urgent: bool) -> dict:
@@ -54,35 +87,32 @@ def _enqueue(student_id: str, reason: str, urgent: bool) -> dict:
     _qm.enqueue(p)
     persistence.save(_qm)
 
-    # FIX: manual position calculation (replaces missing position_of)
-    queue_list = getattr(_qm, "queue", None) or getattr(_qm, "normal_queue", []) or []
-
-    pos = None
-    for i, patient in enumerate(queue_list):
-        if getattr(patient, "student_id", None) == student_id:
-            pos = i + 1
-            break
+    found = _find_in_queue(student_id)
+    pos = found["position"] if found else None
 
     log.info("Enqueued %s (urgent=%s) -> pos %s", student_id, urgent, pos)
     return {"ok": True, "position": pos, "student_id": student_id}
 
 
 def _get_status(student_id: str) -> dict:
-    queue_list = getattr(_qm, "queue", None) or getattr(_qm, "normal_queue", []) or []
+    """
+    Returns a status dict that matches what the JS frontend expects:
+      { status: "waiting" | "not_found", position, total, queue_type }
+    """
+    found = _find_in_queue(student_id)
 
-    pos = None
-    for i, p in enumerate(queue_list):
-        if getattr(p, "student_id", None) == student_id:
-            pos = i + 1
-            break
-
-    total = _qm.total_count()
+    if found:
+        return {
+            "status": "waiting",
+            "position": found["position"],
+            "total": found["total"],
+            "queue_type": found["queue_type"],
+        }
 
     return {
-        "student_id": student_id,
-        "position": pos,
-        "total": total,
-        "found": pos is not None,
+        "status": "not_found",
+        "position": None,
+        "total": _qm.total_count(),
     }
 
 
