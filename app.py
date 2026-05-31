@@ -530,6 +530,7 @@ class ClinicApp(ctk.CTk):
         self._norm_uids      : list = []
         self._manual_mode    : bool = False   # left panel toggle
         self._serving_in_flight : bool = False  # guard against poll race during serve
+        self._enqueue_in_flight : bool = False  # guard against poll wiping a fresh enqueue
 
         restored = persistence.load(self.qm)
         self._build_ui()
@@ -584,10 +585,13 @@ class ClinicApp(ctk.CTk):
 
     def _apply_remote_queue(self, data: dict):
         """Merge remote queue data into local QueueManager and refresh UI."""
-        # If we just fired a serve notification, skip this poll cycle to avoid
-        # a race where the stale Railway response restores the served patient.
+        # Skip if a serve or enqueue just happened locally — the Railway
+        # response in flight is stale and would wipe the fresh local state.
         if self._serving_in_flight:
             log.info("Skipping remote queue apply — serve in flight")
+            return
+        if self._enqueue_in_flight:
+            log.info("Skipping remote queue apply — enqueue in flight")
             return
 
         import heapq
@@ -617,10 +621,17 @@ class ClinicApp(ctk.CTk):
         p = Patient(name, sid, reason, urgent)
         self.qm.enqueue(p)
         persistence.save(self.qm)
+        self._enqueue_in_flight = True
         self._status(
             f"🌐  QR Check-in: {p.student_id}  [{'URGENT 🚨' if urgent else 'Normal'}]",
             C.ACCENT_BLUE)
         self._refresh()
+        # Push to Railway so its queue stays in sync, then clear the guard
+        if C.RAILWAY_URL:
+            self._notify_railway_enqueue(name, sid, reason, urgent)
+        else:
+            # No Railway — clear flag after one poll cycle to resume syncing
+            self.after(6000, lambda: setattr(self, "_enqueue_in_flight", False))
 
     def web_get_status(self, student_id: str) -> dict:
         """Called from Flask thread — read-only, GIL-safe."""
@@ -1046,6 +1057,7 @@ class ClinicApp(ctk.CTk):
         p = Patient(sid, sid, reason, urgent)
         self.qm.enqueue(p)
         persistence.save(self.qm)
+        self._enqueue_in_flight = True
         self._status(
             f"✅  Added: {p.student_id}  [{'URGENT 🚨' if urgent else 'Normal'}]"
             f"  @  {p.time_str()}", C.ACCENT_GREEN)
@@ -1053,6 +1065,11 @@ class ClinicApp(ctk.CTk):
         self._entry_reason.delete(0, "end")
         self._urgent_var.set(False)
         self._refresh()
+        # Push to Railway so its queue stays in sync, then clear the guard
+        if C.RAILWAY_URL:
+            self._notify_railway_enqueue(sid, sid, reason, urgent)
+        else:
+            self.after(6000, lambda: setattr(self, "_enqueue_in_flight", False))
 
     def _serve_patient(self):
         p = self.qm.dequeue()
@@ -1071,6 +1088,34 @@ class ClinicApp(ctk.CTk):
         else:
             # No Railway — clear the flag immediately
             self._serving_in_flight = False
+
+    def _notify_railway_enqueue(self, name: str, sid: str, reason: str, urgent: bool):
+        """POST a locally-added patient to Railway so its queue stays in sync."""
+        import urllib.request
+        import json
+        import threading
+
+        def _post():
+            try:
+                url = f"{C.RAILWAY_URL.rstrip('/')}/api/enqueue"
+                body = json.dumps({
+                    "name": name, "student_id": sid,
+                    "reason": reason, "urgent": urgent
+                }).encode()
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                with urllib.request.urlopen(req, timeout=4):
+                    pass
+                log.info("Notified Railway: enqueued %s", sid)
+            except Exception as exc:
+                log.warning("Failed to notify Railway of enqueue: %s", exc)
+            finally:
+                # Clear guard so polling resumes — whether POST succeeded or not
+                self.after(0, lambda: setattr(self, "_enqueue_in_flight", False))
+
+        threading.Thread(target=_post, daemon=True).start()
 
     def _notify_railway_serve(self, student_id: str):
         """POST to Railway's /api/serve so it removes the patient and sets now_serving."""

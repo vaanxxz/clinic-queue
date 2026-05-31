@@ -136,6 +136,34 @@ def _get_status(student_id: str) -> dict:
 import web_server
 
 
+@web_server.flask_app.route("/api/enqueue", methods=["POST"])
+def api_enqueue():
+    """
+    Called by the desktop app when a patient is added locally (manual entry).
+    Adds the patient to Railway's queue so both sides stay in sync.
+    Body JSON: { name, student_id, reason, urgent }
+    """
+    from flask import request, jsonify
+
+    data = request.get_json(silent=True) or {}
+    name       = data.get("name", "").strip()
+    student_id = data.get("student_id", "").strip()
+    reason     = data.get("reason", "").strip()
+    urgent     = bool(data.get("urgent", False))
+
+    if not student_id or not reason:
+        return jsonify({"ok": False, "error": "missing student_id or reason"}), 400
+
+    # Avoid double-adding if the patient is already in Railway's queue
+    already = _find_in_queue(student_id)
+    if already:
+        log.info("Skipping duplicate enqueue for %s", student_id)
+        return jsonify({"ok": True, "skipped": True})
+
+    result = _enqueue(name or student_id, student_id, reason, urgent)
+    return jsonify(result)
+
+
 @web_server.flask_app.route("/api/serve", methods=["POST"])
 def api_serve():
     """
