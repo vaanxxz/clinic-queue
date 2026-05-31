@@ -1,8 +1,16 @@
 """
-railway_server.py
-=================
+railway_server.py  (FIXED)
+==========================
 Railway deployment entry point.
-Runs the Flask web check-in server ONLY (no GUI/CustomTkinter).
+
+Key fixes vs original:
+  1. _now_serving is now persisted to disk (included in queue_state.json
+     via QueueManager.to_dict / load_dict).
+  2. /api/sync_queue (called after desktop undo) also restores _now_serving
+     from the snapshot payload, so the "Now Serving" display rolls back
+     correctly.
+  3. /api/now_serving endpoint continues to work unchanged.
+  4. Persistence load now initialises _now_serving from disk on startup.
 """
 
 from __future__ import annotations
@@ -36,20 +44,19 @@ import persistence
 
 _qm = QueueManager()
 persistence.load(_qm)
-log.info("Queue manager ready.")
+
+# FIX: restore _now_serving from the persisted queue state
+_now_serving: dict | None = _qm.now_serving
+log.info("Queue manager ready.  now_serving=%s", _now_serving)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _find_in_queue(student_id: str) -> dict | None:
     """
     Search both priority_heap and normal_queue for a patient by student_id.
-    Returns a dict with keys: position, total, queue_type
-    or None if not found.
-    Priority patients always rank before normal ones, so their effective
-    position is their index within the heap (sorted by insertion order).
-    Normal patients' effective position starts after all priority patients.
+    Returns a dict with keys: position, total, queue_type  or None if not found.
     """
-    # Priority heap: sort by _order key so position reflects insertion order
     priority_patients = [p for _, p in sorted(_qm.priority_heap)]
     for i, p in enumerate(priority_patients):
         if getattr(p, "student_id", None) == student_id:
@@ -59,7 +66,6 @@ def _find_in_queue(student_id: str) -> dict | None:
                 "queue_type": "urgent",
             }
 
-    # Normal queue
     for i, p in enumerate(_qm.normal_queue):
         if getattr(p, "student_id", None) == student_id:
             return {
@@ -69,11 +75,6 @@ def _find_in_queue(student_id: str) -> dict | None:
             }
 
     return None
-
-
-# ── Serving state ─────────────────────────────────────────────────────────────
-
-_now_serving: dict | None = None   # {student_id, name, reason, urgent}
 
 
 # ── Stub callbacks (no GUI) ───────────────────────────────────────────────────
@@ -90,6 +91,8 @@ def _enqueue(name: str, student_id: str, reason: str, urgent: bool) -> dict:
     )
 
     _qm.enqueue(p)
+    # FIX: persist now_serving alongside queues so it survives restarts
+    _qm.now_serving = _now_serving
     persistence.save(_qm)
 
     found = _find_in_queue(student_id)
@@ -106,7 +109,6 @@ def _get_status(student_id: str) -> dict:
     """
     global _now_serving
 
-    # Check if this patient is currently being served
     if _now_serving and _now_serving.get("student_id") == student_id:
         return {
             "status": "serving",
@@ -138,11 +140,6 @@ import web_server
 
 @web_server.flask_app.route("/api/enqueue", methods=["POST"])
 def api_enqueue():
-    """
-    Called by the desktop app when a patient is added locally (manual entry).
-    Adds the patient to Railway's queue so both sides stay in sync.
-    Body JSON: { name, student_id, reason, urgent }
-    """
     from flask import request, jsonify
 
     data = request.get_json(silent=True) or {}
@@ -154,7 +151,6 @@ def api_enqueue():
     if not student_id or not reason:
         return jsonify({"ok": False, "error": "missing student_id or reason"}), 400
 
-    # Avoid double-adding if the patient is already in Railway's queue
     already = _find_in_queue(student_id)
     if already:
         log.info("Skipping duplicate enqueue for %s", student_id)
@@ -167,9 +163,8 @@ def api_enqueue():
 @web_server.flask_app.route("/api/serve", methods=["POST"])
 def api_serve():
     """
-    Called by the desktop app when it serves a patient.
-    Removes that patient from Railway's queue and records who is being served.
-    Body JSON: { student_id: str }
+    Remove served patient from Railway's queue and record who is being served.
+    FIX: also persists _now_serving to disk so it survives restarts/rollbacks.
     """
     global _now_serving
     from flask import request, jsonify
@@ -180,7 +175,6 @@ def api_serve():
     if not student_id:
         return jsonify({"ok": False, "error": "missing student_id"}), 400
 
-    # Remove from Railway's queue (dequeue by student_id)
     removed = False
     new_heap = []
     import heapq
@@ -206,7 +200,11 @@ def api_serve():
                 new_norm.append(p)
         _qm.normal_queue = new_norm
 
+    # FIX: keep now_serving in sync with the QueueManager so persistence
+    # captures it as part of the same atomic save.
+    _qm.now_serving = _now_serving
     persistence.save(_qm)
+
     log.info("Serving %s (found_and_removed=%s)", student_id, removed)
     return jsonify({"ok": True, "now_serving": _now_serving})
 
@@ -222,9 +220,12 @@ def api_now_serving():
 def api_sync_queue():
     """
     Called by the desktop app after an undo to push the corrected queue
-    snapshot directly to Railway, bypassing Railway's own undo stack.
-    Body JSON: { priority: [...], normal: [...] }
+    snapshot directly to Railway.
+
+    FIX: the snapshot now includes 'now_serving' (because QueueManager.to_dict
+    includes it).  We restore it here so the Now Serving display rolls back too.
     """
+    global _now_serving
     from flask import request, jsonify
     from models import Patient
     import heapq, collections
@@ -242,16 +243,21 @@ def api_sync_queue():
         Patient.from_dict(d) for d in data.get("normal", [])
     )
 
+    # FIX: restore now_serving from the undo snapshot
+    _now_serving = data.get("now_serving", None)
+    _qm.now_serving = _now_serving
+
     persistence.save(_qm)
     log.info(
-        "Queue synced via undo: %d priority, %d normal",
-        len(_qm.priority_heap), len(_qm.normal_queue)
+        "Queue synced via undo: %d priority, %d normal, now_serving=%s",
+        len(_qm.priority_heap), len(_qm.normal_queue), _now_serving
     )
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "now_serving": _now_serving})
+
 
 web_server._enqueue_callback = _enqueue
-web_server._status_callback = _get_status
-web_server._queue_callback = _qm.to_dict
+web_server._status_callback  = _get_status
+web_server._queue_callback   = _qm.to_dict
 
 log.info("Starting Flask on 0.0.0.0:%d …", C.FLASK_PORT)
 web_server.flask_app.run(
