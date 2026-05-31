@@ -529,6 +529,7 @@ class ClinicApp(ctk.CTk):
         self._now_serving    : Optional[Patient] = None
         self._norm_uids      : list = []
         self._manual_mode    : bool = False   # left panel toggle
+        self._serving_in_flight : bool = False  # guard against poll race during serve
 
         restored = persistence.load(self.qm)
         self._build_ui()
@@ -583,6 +584,12 @@ class ClinicApp(ctk.CTk):
 
     def _apply_remote_queue(self, data: dict):
         """Merge remote queue data into local QueueManager and refresh UI."""
+        # If we just fired a serve notification, skip this poll cycle to avoid
+        # a race where the stale Railway response restores the served patient.
+        if self._serving_in_flight:
+            log.info("Skipping remote queue apply — serve in flight")
+            return
+
         import heapq
         import collections
 
@@ -983,6 +990,7 @@ class ClinicApp(ctk.CTk):
             max_h=C.QUEUE_MAX_H)
         self._prio_frame.pack(fill="x", pady=(0, C.PAD_SMALL))
         self._prio_tree = self._prio_frame.tree
+        self._prio_tree.bind("<<TreeviewSelect>>", self._on_prio_select)
 
     def _build_norm_table(self, parent):
         self._norm_frame = ResizableQueueFrame(
@@ -1052,6 +1060,7 @@ class ClinicApp(ctk.CTk):
             messagebox.showinfo("Empty", "No patients waiting.")
             return
         self._now_serving = p
+        self._serving_in_flight = True   # block poll from restoring this patient
         persistence.save(self.qm)
         self._status(f"▶  Now serving: {p.student_id}", C.ACCENT_TEAL)
         self._now_widget.update_patient(p)
@@ -1059,6 +1068,9 @@ class ClinicApp(ctk.CTk):
         # Notify Railway so its queue state and serving status stay in sync
         if C.RAILWAY_URL:
             self._notify_railway_serve(p.student_id)
+        else:
+            # No Railway — clear the flag immediately
+            self._serving_in_flight = False
 
     def _notify_railway_serve(self, student_id: str):
         """POST to Railway's /api/serve so it removes the patient and sets now_serving."""
@@ -1079,6 +1091,9 @@ class ClinicApp(ctk.CTk):
                 log.info("Notified Railway: serving %s", student_id)
             except Exception as exc:
                 log.warning("Failed to notify Railway of serve: %s", exc)
+            finally:
+                # Always clear the flag so polling resumes (success or failure)
+                self.after(0, lambda: setattr(self, "_serving_in_flight", False))
 
         threading.Thread(target=_post, daemon=True).start()
 
@@ -1150,6 +1165,20 @@ class ClinicApp(ctk.CTk):
         self._stat_urgent.configure(text=str(len(prio)))
         self._stat_normal.configure(text=str(len(norm)))
         self._stat_total.configure(text=str(self.qm.total_count()))
+
+    def _on_prio_select(self, _=None):
+        """Selecting a priority row just highlights it — no mutation."""
+        sel = self._prio_tree.selection()
+        if not sel:
+            return
+        prio = self.qm.priority_patients()
+        children = self._prio_tree.get_children()
+        idx = next((i for i, iid in enumerate(children) if iid == sel[0]), None)
+        if idx is not None and idx < len(prio):
+            p = prio[idx]
+            self._status(
+                f"🚨  Selected urgent: {p.student_id} — use ▶ Serve Next to serve",
+                C.ACCENT_RED)
 
     def _on_norm_select(self, _=None):
         sel = self._norm_tree.selection()
