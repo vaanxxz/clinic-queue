@@ -531,6 +531,7 @@ class ClinicApp(ctk.CTk):
         self._manual_mode    : bool = False   # left panel toggle
         self._serving_in_flight : bool = False  # guard against poll race during serve
         self._enqueue_in_flight : bool = False  # guard against poll wiping a fresh enqueue
+        self._undo_in_flight    : bool = False  # guard against poll overwriting undo'd state
 
         restored = persistence.load(self.qm)
         self._build_ui()
@@ -592,6 +593,9 @@ class ClinicApp(ctk.CTk):
             return
         if self._enqueue_in_flight:
             log.info("Skipping remote queue apply — enqueue in flight")
+            return
+        if self._undo_in_flight:
+            log.info("Skipping remote queue apply — undo in flight")
             return
 
         import heapq
@@ -1161,8 +1165,41 @@ class ClinicApp(ctk.CTk):
             persistence.save(self.qm)
             self._status(f"↩  {msg}", C.TEXT_MUTED)
             self._refresh()
+            # Block next poll(s) from overwriting the undo'd state
+            self._undo_in_flight = True
+            # Notify Railway so its queue matches the undo'd local state
+            if C.RAILWAY_URL:
+                self._notify_railway_undo()
+            else:
+                # No Railway — clear flag after one poll cycle
+                self.after(6000, lambda: setattr(self, "_undo_in_flight", False))
         else:
             messagebox.showinfo("Nothing to Undo", "Undo history is empty.")
+
+    def _notify_railway_undo(self):
+        """
+        POST the full undo'd queue snapshot to Railway so it overwrites
+        its stale state.  Runs in a background thread.
+        """
+        import threading
+        snapshot = self.qm.to_dict()
+
+        def _push():
+            try:
+                url = f"{C.RAILWAY_URL.rstrip('/')}/api/sync_queue"
+                resp = __import__("requests").post(
+                    url, json=snapshot, timeout=5
+                )
+                if resp.ok:
+                    log.info("Railway synced after undo (HTTP %d)", resp.status_code)
+                else:
+                    log.warning("Railway undo sync returned HTTP %d", resp.status_code)
+            except Exception as exc:
+                log.warning("Failed to notify Railway of undo: %s", exc)
+            finally:
+                self.after(0, lambda: setattr(self, "_undo_in_flight", False))
+
+        threading.Thread(target=_push, daemon=True).start()
 
     def _clear_all(self):
         if not messagebox.askyesno("Clear All",

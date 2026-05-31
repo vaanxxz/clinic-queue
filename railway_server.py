@@ -217,6 +217,38 @@ def api_now_serving():
     from flask import jsonify
     return jsonify({"now_serving": _now_serving})
 
+
+@web_server.flask_app.route("/api/sync_queue", methods=["POST"])
+def api_sync_queue():
+    """
+    Called by the desktop app after an undo to push the corrected queue
+    snapshot directly to Railway, bypassing Railway's own undo stack.
+    Body JSON: { priority: [...], normal: [...] }
+    """
+    from flask import request, jsonify
+    from models import Patient
+    import heapq, collections
+
+    data = request.get_json(silent=True)
+    if not data or ("priority" not in data and "normal" not in data):
+        return jsonify({"ok": False, "error": "invalid payload"}), 400
+
+    _qm.priority_heap = []
+    for d in data.get("priority", []):
+        p = Patient.from_dict(d)
+        heapq.heappush(_qm.priority_heap, (p._order, p))
+
+    _qm.normal_queue = collections.deque(
+        Patient.from_dict(d) for d in data.get("normal", [])
+    )
+
+    persistence.save(_qm)
+    log.info(
+        "Queue synced via undo: %d priority, %d normal",
+        len(_qm.priority_heap), len(_qm.normal_queue)
+    )
+    return jsonify({"ok": True})
+
 web_server._enqueue_callback = _enqueue
 web_server._status_callback = _get_status
 web_server._queue_callback = _qm.to_dict
