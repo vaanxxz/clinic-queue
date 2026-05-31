@@ -1056,6 +1056,31 @@ class ClinicApp(ctk.CTk):
         self._status(f"▶  Now serving: {p.student_id}", C.ACCENT_TEAL)
         self._now_widget.update_patient(p)
         self._refresh()
+        # Notify Railway so its queue state and serving status stay in sync
+        if C.RAILWAY_URL:
+            self._notify_railway_serve(p.student_id)
+
+    def _notify_railway_serve(self, student_id: str):
+        """POST to Railway's /api/serve so it removes the patient and sets now_serving."""
+        import urllib.request
+        import json
+        import threading
+
+        def _post():
+            try:
+                url = f"{C.RAILWAY_URL.rstrip('/')}/api/serve"
+                body = json.dumps({"student_id": student_id}).encode()
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                with urllib.request.urlopen(req, timeout=4):
+                    pass
+                log.info("Notified Railway: serving %s", student_id)
+            except Exception as exc:
+                log.warning("Failed to notify Railway of serve: %s", exc)
+
+        threading.Thread(target=_post, daemon=True).start()
 
     def _prioritize(self):
         if self._selected_uid is None:

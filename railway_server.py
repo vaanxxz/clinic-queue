@@ -71,6 +71,11 @@ def _find_in_queue(student_id: str) -> dict | None:
     return None
 
 
+# ── Serving state ─────────────────────────────────────────────────────────────
+
+_now_serving: dict | None = None   # {student_id, name, reason, urgent}
+
+
 # ── Stub callbacks (no GUI) ───────────────────────────────────────────────────
 
 def _enqueue(name: str, student_id: str, reason: str, urgent: bool) -> dict:
@@ -97,8 +102,19 @@ def _enqueue(name: str, student_id: str, reason: str, urgent: bool) -> dict:
 def _get_status(student_id: str) -> dict:
     """
     Returns a status dict that matches what the JS frontend expects:
-      { status: "waiting" | "not_found", position, total, queue_type }
+      { status: "serving" | "waiting" | "not_found", position, total, queue_type }
     """
+    global _now_serving
+
+    # Check if this patient is currently being served
+    if _now_serving and _now_serving.get("student_id") == student_id:
+        return {
+            "status": "serving",
+            "student_id": student_id,
+            "position": 0,
+            "total": _qm.total_count(),
+        }
+
     found = _find_in_queue(student_id)
 
     if found:
@@ -118,6 +134,60 @@ def _get_status(student_id: str) -> dict:
 
 # ── Wire callbacks then run Flask on the MAIN thread (blocks) ─────────────────
 import web_server
+
+
+@web_server.flask_app.route("/api/serve", methods=["POST"])
+def api_serve():
+    """
+    Called by the desktop app when it serves a patient.
+    Removes that patient from Railway's queue and records who is being served.
+    Body JSON: { student_id: str }
+    """
+    global _now_serving
+    from flask import request, jsonify
+
+    data = request.get_json(silent=True) or {}
+    student_id = data.get("student_id", "").strip()
+
+    if not student_id:
+        return jsonify({"ok": False, "error": "missing student_id"}), 400
+
+    # Remove from Railway's queue (dequeue by student_id)
+    removed = False
+    new_heap = []
+    import heapq
+    for order, p in _qm.priority_heap:
+        if p.student_id == student_id:
+            removed = True
+            _now_serving = {"student_id": p.student_id, "name": p.name,
+                            "reason": p.reason, "urgent": p.urgent}
+        else:
+            new_heap.append((order, p))
+    _qm.priority_heap = new_heap
+    heapq.heapify(_qm.priority_heap)
+
+    if not removed:
+        import collections
+        new_norm = collections.deque()
+        for p in _qm.normal_queue:
+            if p.student_id == student_id:
+                removed = True
+                _now_serving = {"student_id": p.student_id, "name": p.name,
+                                "reason": p.reason, "urgent": p.urgent}
+            else:
+                new_norm.append(p)
+        _qm.normal_queue = new_norm
+
+    persistence.save(_qm)
+    log.info("Serving %s (found_and_removed=%s)", student_id, removed)
+    return jsonify({"ok": True, "now_serving": _now_serving})
+
+
+@web_server.flask_app.route("/api/now_serving")
+def api_now_serving():
+    """Returns who is currently being served."""
+    from flask import jsonify
+    return jsonify({"now_serving": _now_serving})
 
 web_server._enqueue_callback = _enqueue
 web_server._status_callback = _get_status
