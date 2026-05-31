@@ -609,6 +609,27 @@ class ClinicApp(ctk.CTk):
             p = Patient.from_dict(d)
             heapq.heappush(self.qm.priority_heap, (p._order, p))
 
+        # FIX: sync now_serving from the remote snapshot.
+        # The fixed QueueManager.to_dict() includes "now_serving", so we
+        # restore it here.  The sentinel guards against old Railway responses
+        # that pre-date the fix (they omit the key entirely).
+        _MISSING = object()
+        remote_ns = data.get("now_serving", _MISSING)
+        if remote_ns is not _MISSING:
+            self.qm.now_serving = remote_ns
+            if remote_ns is not None:
+                serving_patient = Patient(
+                    name=remote_ns.get("name", ""),
+                    student_id=remote_ns.get("student_id", ""),
+                    reason=remote_ns.get("reason", ""),
+                    urgent=remote_ns.get("urgent", False),
+                )
+                self._now_serving = serving_patient
+                self._now_widget.update_patient(serving_patient)
+            else:
+                self._now_serving = None
+                self._now_widget.update_patient(None)
+
         self._refresh()
         log.info(
             "Synced from Railway: %d priority, %d normal",
@@ -1076,11 +1097,21 @@ class ClinicApp(ctk.CTk):
             self.after(6000, lambda: setattr(self, "_enqueue_in_flight", False))
 
     def _serve_patient(self):
+        # dequeue() pushes a snapshot first, so it captures the current
+        # now_serving before we change it — giving undo a full rollback point.
         p = self.qm.dequeue()
         if p is None:
             messagebox.showinfo("Empty", "No patients waiting.")
             return
         self._now_serving = p
+        # FIX: keep qm.now_serving in sync so to_dict() / undo snapshots
+        # carry the serving state and persistence saves it correctly.
+        self.qm.now_serving = {
+            "student_id": p.student_id,
+            "name":       p.name,
+            "reason":     p.reason,
+            "urgent":     p.urgent,
+        }
         self._serving_in_flight = True   # block poll from restoring this patient
         persistence.save(self.qm)
         self._status(f"▶  Now serving: {p.student_id}", C.ACCENT_TEAL)
@@ -1162,6 +1193,24 @@ class ClinicApp(ctk.CTk):
     def _undo(self):
         msg = self.qm.undo()
         if msg:
+            # FIX: qm.undo() atomically restored queues AND now_serving.
+            # Mirror the new now_serving back to self._now_serving and
+            # update the widget — this is what clears "Now Serving" after
+            # undoing a SERVE, or restores it if we undo a different action.
+            ns = self.qm.now_serving
+            if ns is not None:
+                # Rebuild a Patient-like proxy for the widget
+                self._now_serving = Patient(
+                    name=ns.get("name", ""),
+                    student_id=ns.get("student_id", ""),
+                    reason=ns.get("reason", ""),
+                    urgent=ns.get("urgent", False),
+                )
+                self._now_widget.update_patient(self._now_serving)
+            else:
+                self._now_serving = None
+                self._now_widget.update_patient(None)   # clears the card
+
             persistence.save(self.qm)
             self._status(f"↩  {msg}", C.TEXT_MUTED)
             self._refresh()
@@ -1180,20 +1229,33 @@ class ClinicApp(ctk.CTk):
         """
         POST the full undo'd queue snapshot to Railway so it overwrites
         its stale state.  Runs in a background thread.
+
+        FIX: was using __import__("requests") which is NOT in requirements.txt
+        and therefore always raised ImportError on Railway, making every undo
+        sync silently fail.  Replaced with urllib.request (stdlib, always
+        available).  The snapshot now includes "now_serving" (via the fixed
+        QueueManager.to_dict) so Railway will clear its serving state too.
         """
         import threading
-        snapshot = self.qm.to_dict()
+        import json
+        import urllib.request
+        snapshot = self.qm.to_dict()   # now includes now_serving
 
         def _push():
             try:
-                url = f"{C.RAILWAY_URL.rstrip('/')}/api/sync_queue"
-                resp = __import__("requests").post(
-                    url, json=snapshot, timeout=5
+                url  = f"{C.RAILWAY_URL.rstrip('/')}/api/sync_queue"
+                body = json.dumps(snapshot).encode()
+                req  = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
                 )
-                if resp.ok:
-                    log.info("Railway synced after undo (HTTP %d)", resp.status_code)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    status = resp.status
+                if 200 <= status < 300:
+                    log.info("Railway synced after undo (HTTP %d)", status)
                 else:
-                    log.warning("Railway undo sync returned HTTP %d", resp.status_code)
+                    log.warning("Railway undo sync returned HTTP %d", status)
             except Exception as exc:
                 log.warning("Failed to notify Railway of undo: %s", exc)
             finally:
@@ -1205,7 +1267,7 @@ class ClinicApp(ctk.CTk):
         if not messagebox.askyesno("Clear All",
                                    "Clear ALL queues? This cannot be undone."):
             return
-        self.qm.clear()
+        self.qm.clear()   # FIX: qm.clear() now also resets qm.now_serving
         self._now_serving = self._selected_uid = None
         persistence.save(self.qm)
         self._status("🗑  All queues cleared.", C.TEXT_MUTED)
