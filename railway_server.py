@@ -121,6 +121,7 @@ import web_server
 
 web_server._enqueue_callback = _enqueue
 web_server._status_callback = _get_status
+web_server._queue_callback = _qm.to_dict
 
 log.info("Starting Flask on 0.0.0.0:%d …", C.FLASK_PORT)
 web_server.flask_app.run(

@@ -542,6 +542,8 @@ class ClinicApp(ctk.CTk):
         self._center()
         self._tick_clock()
         self.after(C.REFRESH_MS, self._auto_refresh)
+        if C.RAILWAY_URL:
+            self.after(2000, self._poll_railway)
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
@@ -554,6 +556,49 @@ class ClinicApp(ctk.CTk):
     def _auto_refresh(self):
         self._refresh()
         self.after(C.REFRESH_MS, self._auto_refresh)
+
+    def _poll_railway(self):
+        """Fetch queue state from Railway and merge into local display."""
+        import urllib.request
+        import json
+        import threading
+        url = C.RAILWAY_URL
+        if not url:
+            self.after(5000, self._poll_railway)
+            return
+
+        def _fetch():
+            try:
+                with urllib.request.urlopen(
+                    f"{url.rstrip('/')}/api/queue", timeout=4
+                ) as resp:
+                    data = json.loads(resp.read())
+                self.after(0, self._apply_remote_queue, data)
+            except Exception as exc:
+                log.warning("Railway poll failed: %s", exc)
+            finally:
+                self.after(5000, self._poll_railway)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_remote_queue(self, data: dict):
+        """Merge remote queue data into local QueueManager and refresh UI."""
+        import heapq
+        import collections
+
+        self.qm.normal_queue = collections.deque(
+            Patient.from_dict(d) for d in data.get("normal", [])
+        )
+        self.qm.priority_heap = []
+        for d in data.get("priority", []):
+            p = Patient.from_dict(d)
+            heapq.heappush(self.qm.priority_heap, (p._order, p))
+
+        self._refresh()
+        log.info(
+            "Synced from Railway: %d priority, %d normal",
+            len(self.qm.priority_heap), len(self.qm.normal_queue)
+        )
 
     # ── Web callbacks ─────────────────────────────────────────────────────────
 

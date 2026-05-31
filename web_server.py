@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 _enqueue_callback: Callable | None = None
 _status_callback:  Callable | None = None
+_queue_callback:   Callable | None = None
 
 flask_app = Flask(__name__)
 
@@ -361,7 +362,7 @@ def checkin():
 
         if sid and reason and _enqueue_callback:
             # name == student_id (no separate name in v6)
-            _enqueue_callback(sid, reason, urgent)
+            _enqueue_callback(sid, sid, reason, urgent)
 
         from flask import redirect
         return redirect(f"/status/{sid}")
@@ -382,6 +383,14 @@ def api_status(student_id):
     return jsonify({"status": "unavailable"})
 
 
+@flask_app.route("/api/queue")
+def api_queue():
+    """Returns the full queue state for the desktop app to poll."""
+    if _queue_callback:
+        return jsonify(_queue_callback())
+    return jsonify({"priority": [], "normal": [], "total": 0})
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Start
 # ─────────────────────────────────────────────────────────────────────────────
@@ -389,12 +398,14 @@ def api_status(student_id):
 def start(
     enqueue_callback: Callable,
     status_callback:  Callable | None = None,
+    queue_callback:   Callable | None = None,
     host: str = "0.0.0.0",
     port: int = 5000,
 ) -> None:
-    global _enqueue_callback, _status_callback
+    global _enqueue_callback, _status_callback, _queue_callback
     _enqueue_callback = enqueue_callback
     _status_callback  = status_callback
+    _queue_callback   = queue_callback
 
     t = threading.Thread(
         target=lambda: flask_app.run(host=host, port=port,

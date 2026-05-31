@@ -18,6 +18,11 @@ STATE_PATH    = DATA_DIR  / "queue_state.json"
 FLASK_PORT = 5000
 FLASK_HOST = "0.0.0.0"
 
+# Railway polling: set RAILWAY_URL env var on the clinic PC to sync the GUI
+# e.g. export RAILWAY_URL=https://your-clinic-app.up.railway.app
+import os
+RAILWAY_URL: str = os.environ.get("RAILWAY_URL", "")
+
 # ── Timing ────────────────────────────────────────────────────────────────────
 REFRESH_MS = 3000
 
